@@ -46,9 +46,17 @@
 
 #include <sensor_msgs/PointCloud2.h>
 #include <eigen3/Eigen/Core>
+// 这部分代码是对点云提取特征
 
 typedef pcl::PointXYZI PointType;
 int scanID;
+
+// CloudFeatureFlag存储的是当前这个点属于哪一类特征
+// 0: 默认
+// 1: 平面特征
+// 100: 前景遮挡物的边缘角点
+// 150: 平面相交形成的角点
+// 250: 噪点
 
 int CloudFeatureFlag[32000];
 
@@ -61,6 +69,13 @@ cv::Mat matA1(3, 3, CV_32F, cv::Scalar::all(0));
 cv::Mat matD1(1, 3, CV_32F, cv::Scalar::all(0));
 cv::Mat matV1(3, 3, CV_32F, cv::Scalar::all(0));
 
+/**
+ * 判断point_list中的点是否构成平面(因为提特征的时候是在一条线上搜索，所以实际上是判断是否构成平坦的直线)，
+ * 方法是计算协方差矩阵的特征值，判断最大的特征值是否远大于其他的两个
+ * @param point_list
+ * @param plane_threshold
+ * @return
+ */
 bool plane_judge(const std::vector<PointType>& point_list,const int plane_threshold)
 {
   int num = point_list.size();
@@ -138,8 +153,10 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     point.x = laserCloudIn.points[i].x;
     point.y = laserCloudIn.points[i].y;
     point.z = laserCloudIn.points[i].z;
+    // 此处是针对mid40model的旋转方式，通过在yOz方向的横滚角，判断是第几根线
     double theta = std::atan2(laserCloudIn.points[i].y,laserCloudIn.points[i].z) / M_PI * 180 + 180;
-    
+
+    // 这个scanID没有用到
     scanID = std::floor(theta / 9);
     float dis = point.x * point.x
                 + point.y * point.y
@@ -151,6 +168,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     point.intensity = scanID+(laserCloudIn.points[i].intensity/10000);
     //point.intensity = scanID+(double(i)/cloudSize);
 
+    // 抛弃测距为inf的点
     if (!pcl_isfinite(point.x) ||
         !pcl_isfinite(point.y) ||
         !pcl_isfinite(point.z)) {
@@ -196,6 +214,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     // if(depth < 2) depth_threshold = 0.05;
     // if(depth > 30) depth_threshold = 0.1;
     //left curvature
+    // 求当前点左侧邻域的曲率
     float ldiffX = 
                 laserCloud->points[i - 4].x + laserCloud->points[i - 3].x
                 - 4 * laserCloud->points[i - 2].x
@@ -213,6 +232,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
 
     float left_curvature = ldiffX * ldiffX + ldiffY * ldiffY + ldiffZ * ldiffZ;
 
+    // 如果左侧曲率较小，则做一次标记
     if(left_curvature < 0.01){
 
       std::vector<PointType> left_list;
@@ -221,14 +241,16 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
         left_list.push_back(laserCloud->points[i+j]);
       }
 
-      if( left_curvature < 0.001) CloudFeatureFlag[i-2] = 1; //surf point flag  && plane_judge(left_list,1000) 
-      
+      // 如果左侧曲率足够小，则顺便将左侧邻域最中间的那个点标记为平面点
+      if( left_curvature < 0.001) CloudFeatureFlag[i-2] = 1; //surf point flag  && plane_judge(left_list,1000)
+
       left_surf_flag = true;
     }
     else{
       left_surf_flag = false;
     }
 
+    // 计算右侧邻域的曲率
     //right curvature
     float rdiffX = 
                 laserCloud->points[i + 4].x + laserCloud->points[i + 3].x
@@ -247,6 +269,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
 
     float right_curvature = rdiffX * rdiffX + rdiffY * rdiffY + rdiffZ * rdiffZ;
 
+    // 同理，如果右侧曲率较小，则做一次标记
     if(right_curvature < 0.01){
       std::vector<PointType> right_list;
 
@@ -264,10 +287,12 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
       right_surf_flag = false;
     }
 
+    // 如果左右邻域的都较小，判断是不是由两个平面构成的交线(在laser线上就是两条直线构成的交点)
     //surf-surf corner feature
     if(left_surf_flag && right_surf_flag){
      debugnum4 ++;
 
+     // 计算当前点到左右邻域点方向向量的平均
      Eigen::Vector3d norm_left(0,0,0);
      Eigen::Vector3d norm_right(0,0,0);
      for(int k = 1;k<5;k++){
@@ -285,6 +310,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
         norm_right += (k/10.0)* tmp;
      }
 
+      // 计算左右平均方向向量的夹角
       //calculate the angle between this group and the previous group
       double cc = fabs( norm_left.dot(norm_right) / (norm_left.norm()*norm_right.norm()) );
       //calculate the maximum distance, the distance cannot be too small
@@ -297,6 +323,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
       double last_dis = last_tmp.norm();
       double current_dis = current_tmp.norm();
 
+      // 夹角足够接近90度，并且左右邻域足够长，认为是两平面夹角的边缘点
       if(cc < 0.5 && last_dis > 0.05 && current_dis > 0.05 ){ //
         debugnum5 ++;
         CloudFeatureFlag[i] = 150;
@@ -310,6 +337,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
                         laserCloud->points[i].y * laserCloud->points[i].y +
                         laserCloud->points[i].z * laserCloud->points[i].z);
 
+    // 计算左右邻域的点到当前点的梯度
     for(int count = 1; count < 3; count++ ){
       float diffX1 = laserCloud->points[i + count].x - laserCloud->points[i].x;
       float diffY1 = laserCloud->points[i + count].y - laserCloud->points[i].y;
@@ -329,6 +357,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
                     laserCloud->points[i - 1].y * laserCloud->points[i - 1].y +
                     laserCloud->points[i - 1].z * laserCloud->points[i - 1].z);
 
+    // 左右梯度都非常大的点被认为是噪点
      //outliers
     if( (diff_right[0] > 0.1*depth && diff_left[0] > 0.1*depth) ){
       debugnum1 ++;  
@@ -336,6 +365,8 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
       continue;
     }
 
+    // 左右邻域距离非常远，即不属于平面交点的边缘点，比如前景遮挡的情况，这里提取的就是前景的边缘点
+    // 分为左右两种情况(在laser线上的左右，实际上由于mid40的旋转这里可以检测到各个方向的边缘点，但是适配到其他的雷达上效果可能很差)
     //break points
     if(fabs(diff_right[0] - diff_left[0])>0.1){
       if(diff_right[0] > diff_left[0]){
@@ -350,6 +381,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
         //calculate the angle between the laser direction and the surface
         double cc = fabs( surf_vector.dot(lidar_vector) / (surf_vector.norm()*lidar_vector.norm()) );
 
+        // 判断左侧的邻域是否构成平面，通过协方差的特征值大小
         std::vector<PointType> left_list;
         double min_dis = 10000;
         double max_dis = 0;
@@ -366,6 +398,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
         }
         bool left_is_plane = plane_judge(left_list,100);
 
+        // 仅当左侧为平面，并且最近和最远距离差较小，并且左侧邻域与当前点距离较小，且夹角足够接近90度的点才被认为是特征角点
         if(left_is_plane && (max_dis < 2*min_dis) && left_surf_dis < 0.05 * depth  && cc < 0.8){//
           if(depth_right > depth_left){
             CloudFeatureFlag[i] = 100;
@@ -377,6 +410,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
       }
       else{
 
+        // 右侧的情况完全相同，这里考虑可以重构下代码
         Eigen::Vector3d surf_vector = Eigen::Vector3d(laserCloud->points[i+4].x-laserCloud->points[i].x,
                                                       laserCloud->points[i+4].y-laserCloud->points[i].y,
                                                       laserCloud->points[i+4].z-laserCloud->points[i].z);
@@ -415,6 +449,10 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
       }
     }
 
+    // 重复验证，保证边缘点的左侧和右侧邻域的夹角接近90度
+    // (这里有问题，如果按照这种逻辑，那么前景和背景都是平面的情况下，这样的边缘就会被排除掉)，
+    // 可以这样考虑：如果断点处左右都是平面，如果这断点在背景中，那么说明这个断点是由于前景遮挡造成的“阴影边缘”，当雷达移动时阴影边缘点当然会移动
+    // 但是这样的移动是由于视差引起的，与雷达的移动无关，无法用作特征，因此这里考虑将其排除掉
     // break point select
     if(CloudFeatureFlag[i] == 100){
       debugnum2++;
@@ -450,6 +488,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     }
   }
 
+  // 按照上述特征提取过程对点云进行segmentation之后，分别保存边缘和平面两类特征点
   //push_back feature
   for(int i = 0; i < cloudSize; i++){
     //laserCloud->points[i].intensity = double(CloudFeatureFlag[i]) / 10000;
@@ -475,6 +514,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
   }
 
 
+  // 发布相关的topic
   std::cout<<"ALL point: "<<cloudSize<<" outliers: "<< debugnum1 << std::endl
             <<" break points: "<< debugnum2<<" break feature: "<< debugnum3 << std::endl
             <<" normal points: "<< debugnum4<<" surf-surf feature: " << debugnum5 << std::endl;

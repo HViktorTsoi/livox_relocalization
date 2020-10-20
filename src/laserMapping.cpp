@@ -54,6 +54,7 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
+// 这部分代码是利用当前帧点云提取得到的点面特征，在建好的地图上进行定位
 
 typedef pcl::PointXYZI PointType;
 
@@ -242,6 +243,10 @@ void laserCloudFullResHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloud
     newLaserCloudFullRes = true;
 }
 
+/**
+ * 在关键帧列表里遍历，找到初始值；注意这里用来匹配的点云是corner特征
+ * @return
+ */
 //use icp/ndt to match
 double initial_first_pose()
 {
@@ -276,6 +281,7 @@ double initial_first_pose()
     //     add_pose_map.push_back(temp_kf2);
     // }
 
+    // 遍历关键帧列表，计算每一个关键帧位置和当前初始帧的匹配程度，找到匹配最好的位置
     //find the best kf pose
     for(auto kf : pose_map){
         //pcl::NormalDistributionsTransform<PointType,PointType> ndt;
@@ -294,12 +300,14 @@ double initial_first_pose()
         Eigen::Matrix4f init_guess;
         init_guess = kf;
 
+        // 用关键帧作为初始值做icp
         ndt.align(*ndt_output_cloud, init_guess);
 
         std::cout << "init_guess KF : " << std::endl << init_guess << std::endl;
         std::cout << "Normal Distributions Transform has converged:" << ndt.hasConverged()
         << " score: " << ndt.getFitnessScore() << std::endl;
 
+        // 用fitness score来判断匹配度
         double score = ndt.getFitnessScore();
 
         if(score < min_score) {
@@ -308,6 +316,7 @@ double initial_first_pose()
         }   
     }
 
+    // 找到最近的一个关键帧之后，再进行精准匹配，获取精细的初始位姿
     //match and transform
     pcl::IterativeClosestPoint<PointType,PointType> ndt_final;
 
@@ -327,6 +336,7 @@ double initial_first_pose()
 
     std::cout<<" DEBUG : "<< ndt_final.getFinalTransformation() << std::endl;
 
+    // 拿到初始的位姿
     Eigen::Matrix4f relocal_pose = ndt_final.getFinalTransformation();
 
     Eigen::Matrix3f relocal_R = relocal_pose.block<3,3>(0,0);
@@ -336,6 +346,7 @@ double initial_first_pose()
 
     std::cout<<" DEBUG relocal_pose: "<< relocal_pose << std::endl;
 
+    // 将当前位置存储在全局
     transformTobeMapped[0] = euler_angles(0);
     transformTobeMapped[1] = euler_angles(1);
     transformTobeMapped[2] = euler_angles(2);
@@ -448,6 +459,7 @@ int main(int argc, char** argv)
     downSizeFilterFull.setLeafSize(0.15, 0.15, 0.15);
 
     //------------------------------------load relo map -------------------------------
+    // 读取已经建好的地图
     if(pcl::io::loadPCDFile<PointType>(map_file_path + "/corner.pcd",*laserCloudCornerFromMap_relo) == -1){
         PCL_ERROR("Couldn't read file corner_map.pcd\n");
         return(-1);
@@ -461,7 +473,9 @@ int main(int argc, char** argv)
         return(-1);
     }    
     std::ifstream kf_map(map_file_path + "/key_frame.txt");
-    
+
+    // 读取建图时候的关键帧，相当于GT
+    // 在后续匹配的时候，会在关键帧列表里查找与当前点云匹配的最好的一帧
     if(kf_map){
         while(kf_map){
             Eigen::Quaternionf q;
@@ -500,6 +514,7 @@ int main(int argc, char** argv)
         std::cout<<"NO key_frame_map.txt !"<<std::endl;
     }
 
+    // 发布之前建好的地图
     sensor_msgs::PointCloud2 oldmap_allpoints;
     pcl::toROSMsg(*laserCloudALLFromMap_relo, oldmap_allpoints);
     oldmap_allpoints.header.stamp = ros::Time().fromSec(timeLaserCloudCornerLast);
@@ -527,6 +542,7 @@ int main(int argc, char** argv)
     while (status) {
         ros::spinOnce();
 
+        // 保证有新数据到达并且新的数据是同步的
         if (newLaserCloudCornerLast && newLaserCloudSurfLast && newLaserCloudFullRes &&
                 fabs(timeLaserCloudSurfLast - timeLaserCloudCornerLast) < 0.005 &&
                 fabs(timeLaserCloudFullRes - timeLaserCloudCornerLast) < 0.005) {
@@ -538,11 +554,14 @@ int main(int argc, char** argv)
             frameCount++;
             //initial first pose use 10 frames
             if(!firstRelocalization){
+                // *** 注意这里直接将初始的10帧没经过匹配就叠加在一起了
+                // 用来做初始化的点云
                 *ndt_input_cloud += *laserCloudCornerLast;
                 if(frameCount >= 10){
 
                     double score = initial_first_pose();
-                    
+
+                    // 发布初始化之后的初始点云和初始位姿
                     sensor_msgs::PointCloud2 ndt_cloud;
                     pcl::toROSMsg(*ndt_output_cloud, ndt_cloud);
                     ndt_cloud.header.stamp = ros::Time().fromSec(timeLaserCloudCornerLast);
@@ -565,6 +584,7 @@ int main(int argc, char** argv)
 
                     firstRelocalization = true;
 
+                    // ?
                     if(true){
 
                     }
@@ -586,9 +606,11 @@ int main(int argc, char** argv)
             std::cout<<"DEBUG mapping start "<<std::endl;
             frameCount = 0;
 
+            // 这里两个relo_down是建好的地图的角点和平面特征，是直接从文件读取的
             int laserCloudCornerFromMapNum = laserCloudCornerFromMap_relo_down->points.size();
             int laserCloudSurfFromMapNum = laserCloudSurfFromMap_relo_down->points.size();
 
+            // 对当前帧的点云的角点和平面特征进行下采样
             laserCloudCornerLast_down->clear();
             downSizeFilterCorner.setInputCloud(laserCloudCornerLast);
             downSizeFilterCorner.filter(*laserCloudCornerLast_down);
@@ -599,23 +621,32 @@ int main(int argc, char** argv)
             downSizeFilterSurf.filter(*laserCloudSurfLast_down);
             int laserCloudSurfLast_downNum = laserCloudSurfLast_down->points.size();
 
+            // 保证有足够的特征点
             if (laserCloudCornerFromMapNum > 10 && laserCloudSurfFromMapNum > 100) {
             //if (laserCloudSurfFromMapNum > 100) {
+                // 构建特征地图的kdtree
                 kdtreeCornerFromMap->setInputCloud(laserCloudCornerFromMap_relo_down);
                 kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMap_relo_down);
 
+                // 迭代10次
+                // 注意，这两部分就是用点特征和面特征来计算当前点云和地图的匹配，算法上与loam一致
+                // 但是没有用ceres之类的来求解，而是自己计算Jacobian和Hessian
                 for (int iterCount = 0; iterCount < 10; iterCount++) {
                     laserCloudOri->clear();
                     coeffSel->clear();
 
+                    // 处理点线匹配
                     for (int i = 0; i < laserCloudCornerLast_down->points.size(); i++) {
                         pointOri = laserCloudCornerLast_down->points[i];
 
+                        // 将当前点变换到全局的世界坐标系下
                         pointAssociateToMap(&pointOri, &pointSel);
                         //find the closest 5 points
+                        // 在特征地图里找当前点最近的点
                         kdtreeCornerFromMap->nearestKSearch(pointSel, 5, pointSearchInd, pointSearchSqDis);
 
                         if (pointSearchSqDis[4] < 1) {
+                            // 下边这段代码是求邻域的协方差矩阵，然后通过比较特征值来判断邻域是否构成一条线
                             float cx = 0;
                             float cy = 0;
                             float cz = 0;
@@ -665,8 +696,12 @@ int main(int argc, char** argv)
 
                             cv::eigen(matA1, matD1, matV1);
 
+                            // 如果最大的特征值大于其他两个，认为是线特征
                             if (matD1.at<float>(0, 0) > 3 * matD1.at<float>(0, 1)) {
 
+                                // x0: 当前点
+                                // x1: 领域线的一个端点
+                                // x1: 领域线的另一个端点
                                 float x0 = pointSel.x;
                                 float y0 = pointSel.y;
                                 float z0 = pointSel.z;
@@ -700,6 +735,8 @@ int main(int argc, char** argv)
                                 float lc = -((x1 - x2)*((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1))
                                                 + (y1 - y2)*((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1))) / a012 / l12;
 
+                                // ld2是当前点到邻域直线的距离，作为loss的贡献项
+                                // TODO 待验证
                                 float ld2 = a012 / l12;
                                 //if(fabs(ld2) > 1) continue;
 
@@ -718,6 +755,7 @@ int main(int argc, char** argv)
                         }
                     }
 
+                    // 处理点面匹配
                     for (int i = 0; i < laserCloudSurfLast_down->points.size(); i++) {
                         pointOri = laserCloudSurfLast_down->points[i];
 
@@ -735,7 +773,8 @@ int main(int argc, char** argv)
                             //AX+BY+CZ+D = 0 <=> AX+BY+CZ=-D <=> (A/D)X+(B/D)Y+(C/D)Z = -1
                             //(X,Y,Z)<=>mat_a0
                             //A/D, B/D, C/D <=> mat_x0
-                
+
+                            // 求解邻域点的平面方程
                             cv::solve(matA0, matB0, matX0, cv::DECOMP_QR);
 
                             float pa = matX0.at<float>(0, 0);
@@ -751,6 +790,7 @@ int main(int argc, char** argv)
                             pc /= ps;
                             pd /= ps;
 
+                            // 计算邻域点到拟合平面的距离，来判断平面拟合的质量
                             bool planeValid = true;
                             for (int j = 0; j < 5; j++) {
                                 if (fabs(pa * laserCloudSurfFromMap_relo_down->points[pointSearchInd[j]].x +
@@ -762,11 +802,13 @@ int main(int argc, char** argv)
                             }
 
                             if (planeValid) {
+                                // 当前点到平面的距离，作为loss的贡献项
                                 //loss fuction
                                 float pd2 = pa * pointSel.x + pb * pointSel.y + pc * pointSel.z + pd;
 
                                 //if(fabs(pd2) > 0.1) continue;
 
+                                // s是jacobian矩阵的项
                                 float s = 1 - 0.9 * fabs(pd2) / sqrt(sqrt(pointSel.x * pointSel.x + pointSel.y * pointSel.y + pointSel.z * pointSel.z));
 
                                 coeff.x = s * pa;
@@ -795,6 +837,7 @@ int main(int argc, char** argv)
                         continue;
                     }
 
+                    // 求解, matX就是最终的位姿，这部分不用过多解释，和loam中求解两帧点云相对位姿的是等价的
                     //|c1c3+s1s2s3 c3s1s2-c1s3 c2s1|
                     //|   c2s3        c2c3      -s2|
                     //|c1s2s3-c3s1 c1c3s2+s1s3 c1c2|
@@ -869,6 +912,7 @@ int main(int argc, char** argv)
                         matX = matP * matX2;
                     }
 
+                    // 用求解得到的增量更新位姿
                     transformTobeMapped[0] += matX.at<float>(0, 0);
                     transformTobeMapped[1] += matX.at<float>(1, 0);
                     transformTobeMapped[2] += matX.at<float>(2, 0);
@@ -890,8 +934,11 @@ int main(int argc, char** argv)
                     }
                 }
 
+                // 迭代求解得到位姿之后，将其保存为after mapped，即定位得到的最终位姿
                 transformUpdate();
             }
+
+            // 如果需要更新地图，将当前帧变换到世界坐标系下之后更新地图，并进行下采样
             if(use_map_update){
                 for (int i = 0; i < laserCloudCornerLast_down->points.size(); i++) {
                     pointAssociateToMap(&laserCloudCornerLast_down->points[i], &pointSel);
@@ -914,6 +961,7 @@ int main(int argc, char** argv)
                 laserCloudCornerFromMap_relo_down = laserCloudCornerFromMap_relo;
             }
 
+            // 发布变换到世界坐标系下之后的特征点云，以及位姿
             sensor_msgs::PointCloud2 laserCloudSurround3;
             pcl::toROSMsg(*laserCloudSurfFromMap_relo_down, laserCloudSurround3);
             laserCloudSurround3.header.stamp = ros::Time().fromSec(timeLaserCloudCornerLast);

@@ -11,7 +11,7 @@
 
 
   <node pkg="livox_relocalization" type="livox_laserMapping" name="laserMapping" output="screen">
-  <param name="map_file_path" type="string" value=" " />
+  <param name="map_file_path" type="string" value="/media/hvt/D/dataset/LOAM/mid70_re_map" />
   <param name="use_map_update" type="bool" value="true" />
   </node>
 
