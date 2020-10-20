@@ -1,5 +1,9 @@
-## Livox_Relocalization
+## Livox_Relocalization Noted
 Livox-Relocalization is a relocalization package for Livox LiDARs. This package load the map which create by mid40 and then use this map to relocate itself.
+
+This is the noted version.
+
+在代码关键位置添加了中文注释。
 
 - Example map points:
 <div align="center">
